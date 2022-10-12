@@ -1,0 +1,14 @@
+#!/bin/sh
+
+cd $TDIR
+
+# we need to compile stuff in t/
+# redirect to stdout, as check warnings shouldn't break autopkgtest
+perl Build.PL 2>&1
+./Build
+./Build test
+
+# and now remove everything except t/
+# before `smoke' is run
+find . -maxdepth 1 -type f -delete
+rm -r blib/ lib/ inc/ hax/ src/ _build/

@@ -1,0 +1,23 @@
+libxs-parse-keyword-perl (0.21-1) unstable; urgency=medium
+
+  * Import upstream version 0.21.
+
+ -- gregor herrmann <gregoa@debian.org>  Fri, 15 Oct 2021 17:45:41 +0200
+
+libxs-parse-keyword-perl (0.19-1) unstable; urgency=medium
+
+  * Import upstream version 0.19.
+
+ -- gregor herrmann <gregoa@debian.org>  Sun, 10 Oct 2021 23:56:14 +0200
+
+libxs-parse-keyword-perl (0.18-1) unstable; urgency=medium
+
+  * Import upstream version 0.18.
+
+ -- gregor herrmann <gregoa@debian.org>  Wed, 29 Sep 2021 15:44:52 +0200
+
+libxs-parse-keyword-perl (0.14-1) unstable; urgency=low
+
+  * Initial release (closes: #993465).
+
+ -- gregor herrmann <gregoa@debian.org>  Wed, 01 Sep 2021 19:57:55 +0200

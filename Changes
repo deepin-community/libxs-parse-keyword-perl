@@ -1,0 +1,150 @@
+Revision history for XS-Parse-Keyword
+
+0.20    2021-10-11
+        [BUGFIXES]
+         * Fix for perl 5.20 - cannot use assert() as an expression
+
+0.19    2021-10-05
+        [CHANGES]
+         * Defined XPK_PREFIXED_BLOCK_ENTERLEAVE and XPK_SETUP for customizing
+           the parser context around blocks
+
+0.18    2021-09-28
+        [CHANGES]
+         * Define the XPI_OPERAND_ONLY_LOOK flag
+         * Define a callchecker for list/list infix operators. Add a
+           callchecker that can optimise out certain kinds of operations
+           (ref to padav or pkgav, anonlist if XPI_OPERAND_ONLY_LOOK is set)
+
+        [BUGFIXES]
+         * cygwin requires deparse_infix to be declared with XS_INTERNAL()
+           (RT139449)
+         * Some architectures require intermediate storage for values in the
+           test function pp_addpairs (RT139445)
+         * Fix conditions in lexical variable type checking (RT139444)
+
+0.17    2021-09-23
+        [CHANGES]
+         * Support certain kinds of list operands on LHS of infix operators
+         * Generate wrapper functions around list-list infix operators, which
+           unpack their argument lists from two ARRAYrefs
+
+0.16    2021-09-21
+        [CHANGES]
+         * Attempt automatic deparsing of infix operators
+         * Support certain kinds of list operands on RHS of infix operators
+
+0.15    2021-09-06
+        [CHANGES]
+         * Optional generation of wrapper functions around scalar-infix
+           operators
+         * Quieter Build.PL by skipping PL_infix_plugin check on versions
+           of perl known to be too old it
+
+0.14    2021-08-31
+        [CHANGES]
+         * Added the entire XS::Parse::Infix subsystem
+         * Added XPK_INFIX_* token types
+
+0.13    2021-08-26
+        [CHANGES]
+         * Bump to ABI version 2; pass build1's arg0 param as a pointer, not a
+           direct struct copy
+
+        [BUGFIXES]
+         * Back-compat for ABI version 1's build1 arg0 param not having a line
+           number (RT138708)
+
+0.12    2021-08-16
+        [CHANGES]
+         * Support probe on XPK_IDENT, XPK_PACKAGENAME, XPK_COMMALIST
+         * Provide optional versions of XPK_IDENT and XPK_PACKAGENAME
+         * Report the line number each piece was parsed from
+
+0.11    2021-08-03
+        [BUGFIXES]
+         * Split Builder.pm into two parts (static + dynamic), so the static
+           part can be indexed as normal by usual CPAN toolchain (RT138313)
+
+0.10    2021-07-13
+        [CHANGES]
+         * Better configure-time probing for HPUX compiler support
+
+        [BUGFIXES]
+         * Fix for CHOICE/TAGGEDCHOICE corrupting the value of ->i in the
+           result (RT136845)
+
+0.09    2021-07-12
+        [CHANGES]
+         * Attempt to support HPUX, which may need additional compiletime
+           arguments to support anonymous inner unions
+         * Better compiletime error messages by attempting to include some
+           source context in the same style as yyerror()
+         * Slight compiletime performance boost by setting PERL_NO_GET_CONTEXT
+
+        [BUGFIXES]
+         * Check for recursive parser errors and abort (RT137458)
+
+0.08    2021-06-17
+        [CHANGES]
+         * Support probe in XPK_CHOICE and XPK_TAGGEDCHOICE
+
+        [BUGFIXES]
+         * Remember to mask off the typeflags in probe_piece()
+
+0.07    2021-06-16
+        [CHANGES]
+         * Added XPK_BLOCK_VOIDCTX and XPK_TERMEXPR_VOIDCTX
+         * Undocumented the _flags() variants of XPK_BLOCK and XPK_TERMEXPR,
+           and all the flags for them
+         * Support probing in XPK_BLOCK
+         * (undocumented) trial to see if all supported platforms support
+           anonymous unions
+
+0.06    2021-06-01
+        [BREAKING CHANGES]
+         * ABI version is now 1 - this will require a from-source rebuild of
+           all modules using it.
+
+        [CHANGES]
+         * Renamed XPK_STRING to XPK_LITERAL
+         * Support probe on the four bracketed scope types
+         * Added _OPT-suffixed versions of the four bracketed scope types
+         * Added more token types:
+            + XPK_LEXVAR_MY
+            + XPK_COMMA
+            + XPK_PREFIXED_BLOCK
+            + XPK_SEQUENCE
+
+0.05    2021-05-31
+        [CHANGES]
+         * Added context-setting variants of block/expr types:
+            + XPK_BLOCK_SCALARCTX, XPK_BLOCK_LISTCTX
+            + XPK_TERMEXPR_SCALARCTX
+            + XPK_LISTEXPR_LISTCTX
+
+0.04    2021-05-24
+        [CHANGES]
+         * Added many more token types: XPK_LEXVARNAME, XPK_ATTRIBUTES,
+           XPK_VSTRING, XPK_VSTRING_OPT, XPK_EQUALS
+         * Added XPK_COMMALIST structure type
+         * Defined hooks flags XPK_FLAG_STMT, XPK_FLAG_EXPR, XPK_FLAG_AUTOSEMI
+         * API change to the way .build is invoked, allowing greater future
+           compatibility for args structures
+
+0.03    2021-04-27
+        [BUGFIXES]
+         * Fix the `VAR never introduced at ...` warnings from uses of
+           XPK_BLOCK
+         * Make sure the Builder.pm file is mentioned in META.{yml,json} so
+           CPAN tools can find it
+
+0.02    2021-04-21
+        [CHANGES]
+         * Back-compat to perl 5.14
+         * Avoid passing user strings directly to printf, by emitting
+           XPK_FAILURE using croak("%s", str)
+         * Various documentation wording improvements
+
+0.01    2021-04-14
+        First version, released on an unsuspecting world.
