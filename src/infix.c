@@ -13,11 +13,16 @@
 #include "infix.h"
 
 #include "perl-backcompat.c.inc"
+#include "optree-additions.c.inc"
 
 #include "force_list_keeping_pushmark.c.inc"
 #include "make_argcheck_ops.c.inc"
 #include "newOP_CUSTOM.c.inc"
 #include "op_sibling_splice.c.inc"
+
+#if HAVE_PERL_VERSION(5,37,7)
+#  define HAVE_PL_INFIX_PLUGIN
+#endif
 
 #if HAVE_PERL_VERSION(5,32,0)
 #  define HAVE_OP_ISA
@@ -73,26 +78,54 @@ enum OperandShape {
 
 static enum OperandShape operand_shape(const struct HooksAndData *hd)
 {
-  U8 args_flags = (hd->hooks->lhs_flags & 0x07) << 4 | (hd->hooks->rhs_flags & 0x07);
+  U8 lhs_gimme;
+  switch(hd->hooks->lhs_flags & 0x07) {
+    case 0:
+      lhs_gimme = G_SCALAR;
+      break;
 
-  switch(args_flags) {
+    case XPI_OPERAND_TERM_LIST:
+    case XPI_OPERAND_LIST:
+      lhs_gimme = G_LIST;
+      break;
+
+    default:
+      croak("TODO: Unsure how to classify operand shape of .lhs_flags=%02X\n",
+          hd->hooks->lhs_flags & 0x07);
+  }
+
+  U8 rhs_gimme;
+  switch(hd->hooks->rhs_flags & 0x07) {
+    case 0:
+      rhs_gimme = G_SCALAR;
+      break;
+
+    case XPI_OPERAND_TERM_LIST:
+    case XPI_OPERAND_LIST:
+      rhs_gimme = G_LIST;
+      break;
+
+    default:
+      croak("TODO: Unsure how to classify operand shape of .rhs_flags=%02X\n",
+          hd->hooks->rhs_flags & 0x07);
+  }
+
+  switch((lhs_gimme << 4) | (rhs_gimme)) {
     /* scalar OP scalar */
-    case XPI_OPERAND_TERM:
+    case (G_SCALAR<<4) | G_SCALAR:
       return SHAPE_SCALARSCALAR;
 
     /* scalar OP list */
-    case XPI_OPERAND_TERM_LIST:
-    case XPI_OPERAND_LIST:
+    case (G_SCALAR<<4) | G_LIST:
       return SHAPE_SCALARLIST;
 
     /* list OP list */
-    case (XPI_OPERAND_TERM_LIST<<4) | XPI_OPERAND_TERM_LIST:
-    case (XPI_OPERAND_TERM_LIST<<4) | XPI_OPERAND_LIST:
+    case (G_LIST<<4) | G_LIST:
       return SHAPE_LISTLIST;
 
     default:
-      croak("TODO: Unsure how to classify operand shape of args_flags=%02X\n",
-          args_flags);
+      croak("TODO: Unsure how to classify operand shape of lhs_gimme=%d rhs_gimme=%d\n",
+          lhs_gimme, rhs_gimme);
       break;
   }
 }
@@ -107,21 +140,27 @@ struct Registration {
   struct XSParseInfixInfo info;
 
   STRLEN      oplen;
-  enum XSParseInfixClassification cls;
 
   struct HooksAndData hd;
 
   STRLEN permit_hintkey_len;
 
   int opname_is_WIDE : 1;
+  int opname_is_ident : 1;
 };
 
 static struct Registration *registrations;
 
-static OP *new_op(pTHX_ const struct HooksAndData hd, U32 flags, OP *lhs, OP *rhs)
+static OP *new_op(pTHX_ const struct HooksAndData hd, U32 flags, OP *lhs, OP *rhs, SV **parsedata)
 {
-  if(hd.hooks->new_op)
-    return (*hd.hooks->new_op)(aTHX_ flags, lhs, rhs, hd.data);
+  if(hd.hooks->new_op) {
+    if(hd.hooks->flags & (1<<15)) {
+      OP *(*new_op_v1)(pTHX_ U32, OP *, OP *, void *) = (OP *(*)(pTHX_ U32, OP *, OP *, void *))hd.hooks->new_op;
+      return (*new_op_v1)(aTHX_ flags, lhs, rhs, hd.data); /* no parsedata */
+    }
+
+    return (*hd.hooks->new_op)(aTHX_ flags, lhs, rhs, parsedata, hd.data);
+  }
 
   OP *ret = newBINOP_CUSTOM(hd.hooks->ppaddr, flags, lhs, rhs);
 
@@ -167,6 +206,7 @@ static OP *S_unwrap_list(pTHX_ OP *o, bool may_unwrap_anonlist)
     if(kid->op_type == OP_PADAV) {
       /* \@padav can just yield the array directly */
       cLISTOPx(cUNOPo->op_first)->op_first = NULL;
+      cLISTOPx(cUNOPo->op_first)->op_flags &= ~OPf_KIDS;
       op_free(o);
 
       kid->op_flags &= ~(OPf_MOD|OPf_REF);
@@ -177,6 +217,7 @@ static OP *S_unwrap_list(pTHX_ OP *o, bool may_unwrap_anonlist)
        * or something else, but whatever it is we might as well do it
        */
       cLISTOPx(cUNOPo->op_first)->op_first = NULL;
+      cLISTOPx(cUNOPo->op_first)->op_flags &= ~OPf_KIDS;
       op_free(o);
 
       kid->op_flags &= ~(OPf_MOD|OPf_REF);
@@ -197,42 +238,40 @@ static OP *S_unwrap_list(pTHX_ OP *o, bool may_unwrap_anonlist)
 
 #ifdef HAVE_PL_INFIX_PLUGIN
 
-OP *parse(pTHX_ OP *lhs, struct Perl_custom_infix *def)
+void parse(pTHX_ SV **parsedata, struct Perl_custom_infix *def)
+{
+  struct Registration *reg = (struct Registration *)def;
+
+  (*reg->hd.hooks->parse)(aTHX_ 0, parsedata, reg->hd.data);
+}
+
+OP *build_op(pTHX_ SV **parsedata, OP *lhs, OP *rhs, struct Perl_custom_infix *def)
 {
   struct Registration *reg = (struct Registration *)def;
 
   switch(reg->hd.hooks->lhs_flags & 0x07) {
-    case XPI_OPERAND_TERM:
+    case 0:
       break;
 
     case XPI_OPERAND_TERM_LIST:
+    case XPI_OPERAND_LIST:
       lhs = force_list_keeping_pushmark(lhs);
       break;
   }
 
   /* TODO: maybe operator has a 'parse' hook? */
 
-  lex_read_space(0);
-  OP *rhs = NULL;
-
   switch(reg->hd.hooks->rhs_flags & 0x07) {
-    case XPI_OPERAND_TERM:
-      rhs = parse_termexpr(0);
+    case 0:
       break;
 
     case XPI_OPERAND_TERM_LIST:
-      rhs = force_list_keeping_pushmark(parse_termexpr(0));
-      break;
-
     case XPI_OPERAND_LIST:
-      rhs = force_list_keeping_pushmark(parse_listexpr(0));
+      rhs = force_list_keeping_pushmark(rhs);
       break;
-
-    default:
-      croak("hooks->rhs_flags did not provide a valid RHS type");
   }
 
-  return new_op(aTHX_ reg->hd, 0, lhs, rhs);
+  return new_op(aTHX_ reg->hd, 0, lhs, rhs, parsedata);
 }
 
 static STRLEN (*next_infix_plugin)(pTHX_ char *, STRLEN, struct Perl_custom_infix **);
@@ -244,13 +283,13 @@ static STRLEN my_infix_plugin(pTHX_ char *op, STRLEN oplen, struct Perl_custom_i
 
   HV *hints = GvHV(PL_hintgv);
 
-  struct Registration *reg;
+  struct Registration *reg, *bestreg = NULL;
   for(reg = registrations; reg; reg = reg->next) {
     /* custom registrations have hooks, builtin ones do not */
     if(!reg->hd.hooks)
       continue;
 
-    if(reg->oplen != oplen || !strEQ(reg->info.opname, op))
+    if(reg->oplen > oplen || !strnEQ(reg->info.opname, op, reg->oplen))
       continue;
 
     if(reg->hd.hooks->permit_hintkey &&
@@ -261,11 +300,20 @@ static STRLEN my_infix_plugin(pTHX_ char *op, STRLEN oplen, struct Perl_custom_i
       !(*reg->hd.hooks->permit)(aTHX_ reg->hd.data))
       continue;
 
-    *def = &reg->def;
-    return oplen;
+    /* This is a candidate and the best one, unless we already have something
+     * longer
+     */
+    if(bestreg && bestreg->oplen > reg->oplen)
+      continue;
+
+    bestreg = reg;
   }
 
-  return (*next_infix_plugin)(aTHX_ op, oplen, def);
+  if(!bestreg)
+    return (*next_infix_plugin)(aTHX_ op, oplen, def);
+
+  *def = &bestreg->def;
+  return bestreg->oplen;
 }
 #endif
 
@@ -301,8 +349,11 @@ bool XSParseInfix_parse(pTHX_ enum XSParseInfixSelection select, struct XSParseI
       continue;
     if(!strnEQ(buf, reg->info.opname, reg->oplen))
       continue;
-
-    if(!(selection & (1 << reg->cls)))
+    /* If the operator name is an identifer then we don't want to capture a
+     * longer identifier from the incoming source of which this is just a
+     * prefix
+     */
+    if(reg->opname_is_ident && isIDCONT_utf8_safe(buf + reg->oplen, PL_parser->bufend))
       continue;
 
     if(reg->hd.hooks && reg->hd.hooks->permit_hintkey &&
@@ -312,6 +363,12 @@ bool XSParseInfix_parse(pTHX_ enum XSParseInfixSelection select, struct XSParseI
     if(reg->hd.hooks && reg->hd.hooks->permit &&
       !(*reg->hd.hooks->permit)(aTHX_ reg->hd.data))
       continue;
+
+    /* At this point we're committed to this being the best match of operator.
+     * Is it selected by the filter?
+     */
+    if(!(selection & (1 << reg->info.cls)))
+      return FALSE;
 
     *infop = &reg->info;
 
@@ -328,7 +385,7 @@ OP *XSParseInfix_new_op(pTHX_ const struct XSParseInfixInfo *info, U32 flags, OP
     return new_op(aTHX_ (struct HooksAndData) {
         .hooks = info->hooks,
         .data  = info->hookdata,
-      }, flags, lhs, rhs);
+      }, flags, lhs, rhs, NULL);
 
   return newBINOP(info->opcode, flags, lhs, rhs);
 }
@@ -418,7 +475,7 @@ static OP *ckcall_wrapper_func_scalarscalar(pTHX_ OP *op, GV *namegv, SV *ckobj)
   if(!extract_wrapper2_args(aTHX_ op, &left, &right))
     return op;
 
-  return new_op(aTHX_ *hd, 0, left, right);
+  return new_op(aTHX_ *hd, 0, left, right, NULL);
 }
 
 static OP *ckcall_wrapper_func_listlist(pTHX_ OP *op, GV *namegv, SV *ckobj)
@@ -431,24 +488,25 @@ static OP *ckcall_wrapper_func_listlist(pTHX_ OP *op, GV *namegv, SV *ckobj)
 
   return new_op(aTHX_ *hd, 0,
       unwrap_list(left,  hd->hooks->lhs_flags & XPI_OPERAND_ONLY_LOOK),
-      unwrap_list(right, hd->hooks->rhs_flags & XPI_OPERAND_ONLY_LOOK));
-}
-
-#define newSLUGOP(idx)  S_newSLUGOP(aTHX_ idx)
-static OP *S_newSLUGOP(pTHX_ int idx)
-{
-  OP *op = newGVOP(OP_AELEMFAST, 0, PL_defgv);
-  op->op_private = idx;
-  return op;
+      unwrap_list(right, hd->hooks->rhs_flags & XPI_OPERAND_ONLY_LOOK),
+      NULL);
 }
 
 static void make_wrapper_func(pTHX_ const struct HooksAndData *hd)
 {
+  SV *funcname = newSVpvn(hd->hooks->wrapper_func_name, strlen(hd->hooks->wrapper_func_name));
+
+  GV *gv;
+  if((gv = gv_fetchsv(funcname, 0, 0)) && GvCV(gv)) {
+    /* The wrapper function already exists. We presume this is due to a duplicate
+     * registration of identical hooks under a different name and just skip
+     */
+    return;
+  }
+
   /* Prepare to make a new optree-based CV */
   I32 floor_ix = start_subparse(FALSE, 0);
   SAVEFREESV(PL_compcv);
-
-  SV *funcname = newSVpvn(hd->hooks->wrapper_func_name, strlen(hd->hooks->wrapper_func_name));
 
   I32 save_ix = block_start(TRUE);
 
@@ -465,7 +523,7 @@ static void make_wrapper_func(pTHX_ const struct HooksAndData *hd)
 
       /* Body of the function is just  $_[0] OP $_[1] */
       body = op_append_list(OP_LINESEQ, body,
-          new_op(aTHX_ *hd, 0, newSLUGOP(0), newSLUGOP(1)));
+          new_op(aTHX_ *hd, 0, newSLUGOP(0), newSLUGOP(1), NULL));
 
       ckcall = &ckcall_wrapper_func_scalarscalar;
       break;
@@ -481,7 +539,8 @@ static void make_wrapper_func(pTHX_ const struct HooksAndData *hd)
       body = op_append_list(OP_LINESEQ, body,
           new_op(aTHX_ *hd, 0,
             newOP(OP_SHIFT, 0),
-            force_list_keeping_pushmark(newUNOP(OP_RV2AV, OPf_WANT_LIST, newGVOP(OP_GV, 0, PL_defgv)))));
+            force_list_keeping_pushmark(newUNOP(OP_RV2AV, OPf_WANT_LIST, newGVOP(OP_GV, 0, PL_defgv))),
+            NULL));
 
       /* no ckcall */
       break;
@@ -497,7 +556,8 @@ static void make_wrapper_func(pTHX_ const struct HooksAndData *hd)
       body = op_append_list(OP_LINESEQ, body,
           new_op(aTHX_ *hd, 0,
             force_list_keeping_pushmark(newUNOP(OP_RV2AV, 0, newSLUGOP(0))),
-            force_list_keeping_pushmark(newUNOP(OP_RV2AV, 0, newSLUGOP(1)))));
+            force_list_keeping_pushmark(newUNOP(OP_RV2AV, 0, newSLUGOP(1))),
+            NULL));
 
       ckcall = &ckcall_wrapper_func_listlist;
       break;
@@ -589,9 +649,9 @@ static void reg_builtin(pTHX_ const char *opname, enum XSParseInfixClassificatio
   reg->info.opname = savepv(opname);
   reg->info.opcode = opcode;
   reg->info.hooks  = NULL;
+  reg->info.cls    = cls;
 
   reg->oplen  = strlen(opname);
-  reg->cls    = cls;
 
   reg->hd.hooks = NULL;
   reg->hd.data  = NULL;
@@ -606,7 +666,30 @@ static void reg_builtin(pTHX_ const char *opname, enum XSParseInfixClassificatio
 
 void XSParseInfix_register(pTHX_ const char *opname, const struct XSParseInfixHooks *hooks, void *hookdata)
 {
+  STRLEN oplen = strlen(opname);
+  const char *opname_end = opname + oplen;
+  bool opname_is_ident = isIDFIRST_utf8_safe(opname, opname_end);
+
+  {
+    const char *s = opname;
+    s += UTF8SKIP(s);
+
+    while(s < opname_end) {
+      if(opname_is_ident) {
+        if(!isIDCONT_utf8_safe(s, opname_end))
+          croak("Infix operator name that starts with an identifier may not have non-identifier characters in it");
+      }
+      else {
+        if(isIDFIRST_utf8_safe(s, opname_end))
+          croak("Infix operator name that does not start with an identifer may not have identifier characters in it");
+      }
+      s += UTF8SKIP(s);
+    }
+  }
+
   switch(hooks->flags) {
+    case (1<<15):
+      /* undocumented internal flag to indicate v1-compatible ->new_op hook function */
     case 0:
       break;
     default:
@@ -614,36 +697,103 @@ void XSParseInfix_register(pTHX_ const char *opname, const struct XSParseInfixHo
   }
 
   switch(hooks->lhs_flags & ~(XPI_OPERAND_ONLY_LOOK)) {
-    case XPI_OPERAND_TERM:
+    case 0:
     case XPI_OPERAND_TERM_LIST:
+    case XPI_OPERAND_LIST:
       break;
     default:
       croak("Unrecognised XSParseInfixHooks.lhs_flags value 0x%X", hooks->lhs_flags);
   }
 
   switch(hooks->rhs_flags & ~(XPI_OPERAND_ONLY_LOOK)) {
-    case XPI_OPERAND_TERM:
+    case 0:
     case XPI_OPERAND_TERM_LIST:
     case XPI_OPERAND_LIST:
       break;
     default:
       croak("Unrecognised XSParseInfixHooks.rhs_flags value 0x%X", hooks->rhs_flags);
+
+    case XPI_OPERAND_CUSTOM:
+      croak("TODO: Currently XPI_OPERAND_CUSTOM is not supported");
   }
+
+#ifdef HAVE_PL_INFIX_PLUGIN
+  enum Perl_custom_infix_precedence prec = 0;
+
+  switch(hooks->cls) {
+    case 0:
+      warn("Unspecified operator classification for %s; treating it as RELATION for precedence", opname);
+    case XPI_CLS_RELATION:
+    case XPI_CLS_EQUALITY:
+    case XPI_CLS_MATCH_MISC:
+      prec = INFIX_PREC_REL;
+      break;
+
+    case XPI_CLS_LOW_MISC:
+      prec = INFIX_PREC_LOW;
+      break;
+
+    case XPI_CLS_LOGICAL_OR_LOW_MISC:
+      prec = INFIX_PREC_LOGICAL_OR_LOW;
+      break;
+
+    case XPI_CLS_LOGICAL_AND_LOW_MISC:
+      prec = INFIX_PREC_LOGICAL_AND_LOW;
+      break;
+
+    case XPI_CLS_ASSIGN_MISC:
+      prec = INFIX_PREC_ASSIGN;
+      break;
+
+    case XPI_CLS_LOGICAL_OR_MISC:
+      prec = INFIX_PREC_LOGICAL_OR;
+      break;
+
+    case XPI_CLS_LOGICAL_AND_MISC:
+      prec = INFIX_PREC_LOGICAL_AND;
+      break;
+
+    case XPI_CLS_ADD_MISC:
+      prec = INFIX_PREC_ADD;
+      break;
+
+    case XPI_CLS_MUL_MISC:
+      prec = INFIX_PREC_MUL;
+      break;
+
+    case XPI_CLS_POW_MISC:
+      prec = INFIX_PREC_POW;
+      break;
+
+    case XPI_CLS_HIGH_MISC:
+      prec = INFIX_PREC_HIGH;
+      break;
+
+    default:
+      croak("TODO: need to write code for hooks->cls == %d\n", hooks->cls);
+  }
+#endif
 
   struct Registration *reg;
   Newx(reg, 1, struct Registration);
 
 #ifdef HAVE_PL_INFIX_PLUGIN
-  reg->def.parse = &parse;
+  reg->def.prec  = prec;
+  if(hooks->parse)
+    reg->def.parse = &parse;
+  else
+    reg->def.parse = NULL;
+  reg->def.build_op = &build_op;
 #endif
 
   reg->info.opname = savepv(opname);
   reg->info.opcode = OP_CUSTOM;
   reg->info.hooks    = hooks;
   reg->info.hookdata = hookdata;
+  reg->info.cls      = hooks->cls;
 
-  reg->oplen  = strlen(opname);
-  reg->cls    = hooks->cls;
+  reg->oplen           = oplen;
+  reg->opname_is_ident = opname_is_ident;
 
   reg->hd.hooks = hooks;
   reg->hd.data  = hookdata;
@@ -749,11 +899,6 @@ void XSParseInfix_boot(pTHX)
   ));
 
 #ifdef HAVE_PL_INFIX_PLUGIN
-  OP_CHECK_MUTEX_LOCK;
-  if(!next_infix_plugin) {
-    next_infix_plugin = PL_infix_plugin;
-    PL_infix_plugin = &my_infix_plugin;
-  }
-  OP_CHECK_MUTEX_UNLOCK;
+  wrap_infix_plugin(&my_infix_plugin, &next_infix_plugin);
 #endif
 }

@@ -3,7 +3,7 @@
 use v5.14;
 use warnings;
 
-use Test::More;
+use Test2::V0;
 
 use lib "t";
 use testcase "t::pieces";
@@ -33,6 +33,28 @@ my $ret;
 {
    $ret = piecetermexpr( "x" ) . "y";
    is( $ret, "(x)y", 'termexpr treats (PARENS) as entire expression' );
+}
+
+# termexpr in piece1 can act as eat empty parens
+{
+   no warnings 'uninitialized';
+
+   $ret = piecetermexpr() . "y";
+   is( $ret, "()y", 'termexpr accepts empty (PARENS)' );
+}
+
+{
+   $ret = pieceprefixedtermexpr_VAR $VAR . ", world!";
+   is( $ret, "(Hello, world!)", 'result of pieceprefixedtermexpr_VAR' );
+}
+
+# optional termexpr
+{
+   my $ret1 = piecetermexpr_opt "term";
+   my $ret2 = piecetermexpr_opt;
+
+   is( $ret1, "(term)", 'optional termexpr with value' );
+   is( $ret2, undef,    'optional termexpr empty' );
 }
 
 done_testing;

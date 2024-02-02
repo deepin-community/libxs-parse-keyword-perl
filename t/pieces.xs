@@ -1,7 +1,7 @@
 /*  You may distribute under the terms of either the GNU General Public License
  *  or the Artistic License (the same terms as Perl itself)
  *
- *  (C) Paul Evans, 2021 -- leonerd@leonerd.org.uk
+ *  (C) Paul Evans, 2021-2022 -- leonerd@leonerd.org.uk
  */
 
 #include "EXTERN.h"
@@ -17,9 +17,16 @@ static const char hintkey[] = "t::pieces/permit";
 
 static int build_expr(pTHX_ OP **out, XSParseKeywordPiece *arg0, void *hookdata)
 {
+  OP *expr = arg0->op;
+
+  if(!expr) {
+    *out = newOP(OP_STUB, 0);
+    return KEYWORD_PLUGIN_EXPR;
+  }
+
   /* wrap the result in "("...")" parens so we can unit-test how it parsed */
   *out = newBINOP(OP_CONCAT, 0,
-    newBINOP(OP_CONCAT, 0, newSVOP(OP_CONST, 0, newSVpvs("(")), op_scope(arg0->op)),
+    newBINOP(OP_CONCAT, 0, newSVOP(OP_CONST, 0, newSVpvs("(")), op_scope(expr)),
     newSVOP(OP_CONST, 0, newSVpvs(")")));
   return KEYWORD_PLUGIN_EXPR;
 }
@@ -42,13 +49,19 @@ static int build_prefixedblock(pTHX_ OP **out, XSParseKeywordPiece *args[], size
 
 static int build_anonsub(pTHX_ OP **out, XSParseKeywordPiece *arg0, void *hookdata)
 {
-  *out = newSVOP(OP_CONST, 0, newRV_noinc((SV *)cv_clone(arg0->cv)));
+  *out = newUNOP(OP_REFGEN, 0,
+    newSVOP(OP_ANONCODE, 0, (SV *)arg0->cv));
   return KEYWORD_PLUGIN_EXPR;
 }
 
 static int build_list(pTHX_ OP **out, XSParseKeywordPiece *arg0, void *hookdata)
 {
   OP *list = arg0->op;
+
+  if(!list) {
+    *out = newOP(OP_STUB, 0);
+    return KEYWORD_PLUGIN_EXPR;
+  }
 
   /* TODO: Consider always doing this? */
   if(list->op_type != OP_LIST)
@@ -95,7 +108,7 @@ static int build_literal(pTHX_ OP **out, XSParseKeywordPiece *arg0, void *hookda
 {
   /* ignore arg0 */
 
-  *out = newSVOP(OP_CONST, 0, (SV *)hookdata);
+  *out = newSVOP(OP_CONST, 0, SvREFCNT_inc((SV *)hookdata));
 
   return KEYWORD_PLUGIN_EXPR;
 }
@@ -124,6 +137,20 @@ static int build_infix_opname(pTHX_ OP **out, XSParseKeywordPiece *arg0, void *h
   return KEYWORD_PLUGIN_EXPR;
 }
 
+static int build_lexvar_intro(pTHX_ OP **out, XSParseKeywordPiece *args[], size_t nargs, void *hookdata)
+{
+  PADOFFSET padix = args[0]->padix;
+  OP *expr = args[1]->op;
+
+  OP *varop = newOP(OP_PADSV, OPf_MOD|OPf_REF | (OPpLVAL_INTRO << 8));
+  varop->op_targ = padix;
+
+  OP *assignop = newASSIGNOP(OPf_WANT_VOID, varop, 0, newSVOP(OP_CONST, 0, newSViv(1)));
+
+  *out = newLISTOP(OP_LINESEQ, 0, assignop, expr);
+  return KEYWORD_PLUGIN_EXPR;
+}
+
 static void setup_block_VAR(pTHX_ void *hookdata)
 {
   char *varname = hookdata;
@@ -131,6 +158,40 @@ static void setup_block_VAR(pTHX_ void *hookdata)
   intro_my();
 
   sv_setpvs(PAD_SVl(padix), "Hello");
+}
+
+static void callback_catpv_stages(pTHX_ const char *pv)
+{
+  SV *sv = get_sv("main::STAGES", GV_ADD);
+  if(!SvPOK(sv))
+    sv_setpvs(sv, "");
+
+  if(SvCUR(sv))
+    sv_catpvs(sv, ",");
+
+  sv_catpv(sv, pv);
+}
+
+static void callback_PREPARE(pTHX_ void *hookdata)
+{
+  callback_catpv_stages(aTHX_ "PREPARE");
+}
+
+static void callback_START(pTHX_ void *hookdata)
+{
+  callback_catpv_stages(aTHX_ "START");
+}
+
+static OP *callback_END(pTHX_ OP *o, void *hookdata)
+{
+  callback_catpv_stages(aTHX_ "END");
+  return o;
+}
+
+static OP *callback_WRAP(pTHX_ OP *o, void *hookdata)
+{
+  callback_catpv_stages(aTHX_ "WRAP");
+  return o;
 }
 
 static const struct XSParseKeywordHooks hooks_block = {
@@ -176,10 +237,49 @@ static const struct XSParseKeywordHooks hooks_anonsub = {
   .build1 = &build_anonsub,
 };
 
+static const struct XSParseKeywordHooks hooks_stagedanonsub = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_STAGED_ANONSUB(
+    XPK_ANONSUB_PREPARE(&callback_PREPARE),
+    XPK_ANONSUB_START(&callback_START),
+    XPK_ANONSUB_START(&setup_block_VAR),
+    XPK_ANONSUB_END(&callback_END),
+    XPK_ANONSUB_WRAP(&callback_WRAP)
+  ),
+  .build1 = &build_anonsub,
+};
+
+static const struct XSParseKeywordHooks hooks_arithexpr = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_ARITHEXPR,
+  .build1 = &build_expr,
+};
+static const struct XSParseKeywordHooks hooks_arithexpr_opt = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_ARITHEXPR_OPT,
+  .build1 = &build_expr,
+};
+
 static const struct XSParseKeywordHooks hooks_termexpr = {
   .permit_hintkey = hintkey,
 
   .piece1 = XPK_TERMEXPR,
+  .build1 = &build_expr,
+};
+static const struct XSParseKeywordHooks hooks_termexpr_opt = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_TERMEXPR_OPT,
+  .build1 = &build_expr,
+};
+
+static const struct XSParseKeywordHooks hooks_prefixedtermexpr_VAR = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_PREFIXED_TERMEXPR_ENTERLEAVE( XPK_SETUP(&setup_block_VAR) ),
   .build1 = &build_expr,
 };
 
@@ -187,6 +287,12 @@ static const struct XSParseKeywordHooks hooks_listexpr = {
   .permit_hintkey = hintkey,
 
   .piece1 = XPK_LISTEXPR,
+  .build1 = &build_list,
+};
+static const struct XSParseKeywordHooks hooks_listexpr_opt = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_LISTEXPR_OPT,
   .build1 = &build_list,
 };
 
@@ -218,11 +324,32 @@ static const struct XSParseKeywordHooks hooks_lexvar_name = {
   .build1 = &build_constsv,
 };
 
+static const struct XSParseKeywordHooks hooks_lexvar = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_LEXVAR(XPK_LEXVAR_ANY),
+  .build1 = &build_constpadix,
+};
+
 static const struct XSParseKeywordHooks hooks_lexvar_my = {
   .permit_hintkey = hintkey,
 
   .piece1 = XPK_LEXVAR_MY(XPK_LEXVAR_ANY),
   .build1 = &build_constpadix,
+};
+
+static const struct XSParseKeywordHooks hooks_lexvar_my_intro = {
+  .flags = XPK_FLAG_BLOCKSCOPE,
+  .permit_hintkey = hintkey,
+
+  .pieces = (const struct XSParseKeywordPieceType []){
+    XPK_LEXVAR_MY(XPK_LEXVAR_ANY),
+    XPK_KEYWORD("in"),
+    XPK_INTRO_MY,
+    XPK_TERMEXPR,
+    0
+  },
+  .build = &build_lexvar_intro,
 };
 
 static const struct XSParseKeywordHooks hooks_attrs = {
@@ -277,6 +404,34 @@ static const struct XSParseKeywordHooks hooks_str = {
   .build1 = &build_literal,
 };
 
+static const struct XSParseKeywordHooks hooks_kw = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_KEYWORD("bar"),
+  .build1 = &build_literal,
+};
+
+static const struct XSParseKeywordHooks hooks_autosemi = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_AUTOSEMI,
+  .build1 = &build_literal,
+};
+
+static const struct XSParseKeywordHooks hooks_warning = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_WARNING("A warning here\n"),
+  .build1 = &build_literal,
+};
+
+static const struct XSParseKeywordHooks hooks_warning_deprecated = {
+  .permit_hintkey = hintkey,
+
+  .piece1 = XPK_WARNING_DEPRECATED("A deprecated warning here\n"),
+  .build1 = &build_literal,
+};
+
 MODULE = t::pieces  PACKAGE = t::pieces
 
 BOOT:
@@ -290,15 +445,26 @@ BOOT:
   register_xs_parse_keyword("pieceprefixedblock_VAR", &hooks_prefixedblock_VAR, "$VAR");
 
   register_xs_parse_keyword("pieceanonsub", &hooks_anonsub, NULL);
-  register_xs_parse_keyword("piecetermexpr", &hooks_termexpr, NULL);
-  register_xs_parse_keyword("piecelistexpr", &hooks_listexpr, NULL);
+
+  register_xs_parse_keyword("piecestagedanonsub", &hooks_stagedanonsub, "$VAR");
+
+  register_xs_parse_keyword("piecearithexpr",     &hooks_arithexpr,     NULL);
+  register_xs_parse_keyword("piecearithexpr_opt", &hooks_arithexpr_opt, NULL);
+  register_xs_parse_keyword("piecetermexpr",      &hooks_termexpr,      NULL);
+  register_xs_parse_keyword("piecetermexpr_opt",  &hooks_termexpr_opt,  NULL);
+  register_xs_parse_keyword("piecelistexpr",      &hooks_listexpr,      NULL);
+  register_xs_parse_keyword("piecelistexpr_opt",  &hooks_listexpr_opt,  NULL);
+
+  register_xs_parse_keyword("pieceprefixedtermexpr_VAR", &hooks_prefixedtermexpr_VAR, "$VAR");
 
   register_xs_parse_keyword("pieceident", &hooks_ident, NULL);
   register_xs_parse_keyword("pieceident_opt", &hooks_ident_opt, NULL);
   register_xs_parse_keyword("piecepkg", &hooks_packagename, NULL);
 
   register_xs_parse_keyword("piecelexvarname", &hooks_lexvar_name, NULL);
+  register_xs_parse_keyword("piecelexvar",     &hooks_lexvar,      NULL);
   register_xs_parse_keyword("piecelexvarmy",   &hooks_lexvar_my,   NULL);
+  register_xs_parse_keyword("piecelexvarmyintro", &hooks_lexvar_my_intro, NULL);
 
   register_xs_parse_keyword("pieceattrs", &hooks_attrs, NULL);
 
@@ -311,3 +477,9 @@ BOOT:
   register_xs_parse_keyword("piececolon", &hooks_colon, newSVpvs("colon"));
 
   register_xs_parse_keyword("piecestr", &hooks_str, newSVpvs("foo"));
+  register_xs_parse_keyword("piecekw",  &hooks_kw,  newSVpvs("bar"));
+
+  register_xs_parse_keyword("pieceautosemi", &hooks_autosemi, newSVpvs("EOS"));
+
+  register_xs_parse_keyword("piecewarning", &hooks_warning, &PL_sv_undef);
+  register_xs_parse_keyword("piecewarndep", &hooks_warning_deprecated, &PL_sv_undef);

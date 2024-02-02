@@ -3,7 +3,7 @@
 use v5.14;
 use warnings;
 
-use Test::More;
+use Test2::V0;
 
 use lib "t";
 use testcase "t::pieces";
@@ -27,6 +27,15 @@ my $ret;
 {
    $ret = join "", "x", piecelistexpr "inside", "y";
    is( $ret, "xinside,y", 'listexpr consumes comma' );
+}
+
+# optional listexpr
+{
+   my $ret1 = piecelistexpr_opt 1, 2, 3;
+   my $ret2 = piecelistexpr_opt;
+
+   is( $ret1, "1,2,3", 'optional listexpr with values' );
+   is( $ret2, undef,   'optional listexpr empty' );
 }
 
 done_testing;
