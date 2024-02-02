@@ -1,3 +1,4 @@
+.editorconfig
 Build.PL
 Changes
 hax/force_list_keeping_pushmark.c.inc
@@ -6,6 +7,7 @@ hax/make_argcheck_aux.c.inc
 hax/make_argcheck_ops.c.inc
 hax/newOP_CUSTOM.c.inc
 hax/op_sibling_splice.c.inc
+hax/optree-additions.c.inc
 hax/perl-backcompat.c.inc
 hax/wrap_keyword_plugin.c.inc
 inc/Module/Build/with/XSTests.pm
@@ -31,6 +33,7 @@ t/11stages-check.t
 t/30pieces-literal.t
 t/31pieces-block.t
 t/32pieces-anonsub.t
+t/33pieces-arithexpr.t
 t/33pieces-listexpr.t
 t/33pieces-termexpr.t
 t/34pieces-ident.t
@@ -38,9 +41,10 @@ t/35pieces-lexvar.t
 t/36pieces-attrs.t
 t/37pieces-vstring.t
 t/38pieces-infix.t
+t/39pieces-warning.t
 t/40build.t
 t/41structures.t
-t/42scopes.t
+t/42containers.t
 t/43probing.t
 t/50flags-autosemi.t
 t/60line.t

@@ -1,7 +1,7 @@
 /*  You may distribute under the terms of either the GNU General Public License
  *  or the Artistic License (the same terms as Perl itself)
  *
- *  (C) Paul Evans, 2021 -- leonerd@leonerd.org.uk
+ *  (C) Paul Evans, 2021-2023 -- leonerd@leonerd.org.uk
  */
 
 #define PERL_NO_GET_CONTEXT
@@ -87,8 +87,8 @@ void MY_lex_expect_unichar(pTHX_ int c)
     croak("parse failed--compilation aborted")
 
 /* TODO: Only ASCII */
-#define lex_probe_str(s)   MY_lex_probe_str(aTHX_ s)
-STRLEN MY_lex_probe_str(pTHX_ const char *s)
+#define lex_probe_str(s, b)   MY_lex_probe_str(aTHX_ s, b)
+STRLEN MY_lex_probe_str(pTHX_ const char *s, bool boundarycheck)
 {
   STRLEN i;
   for(i = 0; s[i]; i++) {
@@ -96,17 +96,32 @@ STRLEN MY_lex_probe_str(pTHX_ const char *s)
       return 0;
   }
 
+  if(boundarycheck && isALNUM(PL_parser->bufptr[i]))
+    return 0;
+
   return i;
 }
 
-#define lex_expect_str(s)  MY_lex_expect_str(aTHX_ s)
-void MY_lex_expect_str(pTHX_ const char *s)
+#define lex_expect_str(s, b)  MY_lex_expect_str(aTHX_ s, b)
+void MY_lex_expect_str(pTHX_ const char *s, bool boundarycheck)
 {
-  STRLEN len = lex_probe_str(s);
+  STRLEN len = lex_probe_str(s, boundarycheck);
   if(!len)
     yycroakf("Expected \"%s\"", s);
 
   lex_read_to(PL_parser->bufptr + len);
+}
+
+#define parse_autosemi()  MY_parse_autosemi(aTHX)
+void MY_parse_autosemi(pTHX)
+{
+  int c = lex_peek_unichar(0);
+  if(c == ';')
+    lex_read_unichar(0);
+  else if(!c || c == '}')
+    ; /* all is good */
+  else
+    yycroak("Expected: ';' or end of block");
 }
 
 struct Registration;
@@ -156,6 +171,8 @@ static bool probe_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
 #endif
     CopLINE(PL_curcop);
 
+  bool is_special  = !!(piece->type & XPK_TYPEFLAG_SPECIAL);
+
   U32 type = piece->type & 0xFFFF;
 
   switch(type) {
@@ -169,7 +186,7 @@ static bool probe_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
 
     case XS_PARSE_KEYWORD_LITERALSTR:
     {
-      STRLEN len = lex_probe_str(piece->u.str);
+      STRLEN len = lex_probe_str(piece->u.str, is_special);
       if(!len)
         return FALSE;
 
@@ -229,6 +246,8 @@ static bool probe_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
       if(!probe_piece(aTHX_ argsv, argidx, pieces++, hookdata))
         return FALSE;
 
+      lex_read_space(0);
+
       parse_pieces(aTHX_ argsv, argidx, pieces, hookdata);
       return TRUE;
     }
@@ -274,9 +293,11 @@ static bool probe_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
       }
       /* we're now committed */
       THISARG.i = 1;
+      lex_read_space(0);
       if(pieces[2].type)
         parse_pieces(aTHX_ argsv, argidx, pieces + 2, hookdata);
 
+      lex_read_space(0);
       if(!probe_piece(aTHX_ argsv, argidx, pieces + 0, hookdata))
         return TRUE;
 
@@ -284,34 +305,39 @@ static bool probe_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
         parse_pieces(aTHX_ argsv, argidx, pieces + 1, hookdata);
         THISARG.i++;
 
+        lex_read_space(0);
+
         if(!probe_piece(aTHX_ argsv, argidx, pieces + 0, hookdata))
           break;
       }
       return TRUE;
     }
 
-    case XS_PARSE_KEYWORD_PARENSCOPE:
+    case XS_PARSE_KEYWORD_PARENS:
+      if(piece->type & XPK_TYPEFLAG_MAYBEPARENS)
+        croak("TODO: probe_piece on type=PARENS+MAYBEPARENS");
+
       if(lex_peek_unichar(0) != '(')
         return FALSE;
 
       parse_piece(aTHX_ argsv, argidx, piece, hookdata);
       return TRUE;
 
-    case XS_PARSE_KEYWORD_BRACKETSCOPE:
+    case XS_PARSE_KEYWORD_BRACKETS:
       if(lex_peek_unichar(0) != '[')
         return FALSE;
 
       parse_piece(aTHX_ argsv, argidx, piece, hookdata);
       return TRUE;
 
-    case XS_PARSE_KEYWORD_BRACESCOPE:
+    case XS_PARSE_KEYWORD_BRACES:
       if(lex_peek_unichar(0) != '{')
         return FALSE;
 
       parse_piece(aTHX_ argsv, argidx, piece, hookdata);
       return TRUE;
 
-    case XS_PARSE_KEYWORD_CHEVRONSCOPE:
+    case XS_PARSE_KEYWORD_CHEVRONS:
       if(lex_peek_unichar(0) != '<')
         return FALSE;
 
@@ -322,14 +348,35 @@ static bool probe_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
   croak("TODO: probe_piece on type=%d\n", type);
 }
 
+static void parse_prefix_pieces(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKeywordPieceType *pieces, void *hookdata)
+{
+  while(pieces->type) {
+    if(pieces->type == XS_PARSE_KEYWORD_SETUP)
+      (pieces->u.callback)(aTHX_ hookdata);
+    else {
+      parse_piece(aTHX_ argsv, argidx, pieces, hookdata);
+      lex_read_space(0);
+    }
+
+    pieces++;
+  }
+
+  intro_my();  /* in case any of the pieces was XPK_LEXVAR_MY */
+}
+
 static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKeywordPieceType *piece, void *hookdata)
 {
   int argi = *argidx;
 
-  if(argi >= (SvLEN(argsv) / sizeof(XSParseKeywordPiece)))
-    SvGROW(argsv, SvLEN(argsv) * 2);
+#define CHECK_GROW_ARGSV  \
+  do {                                                       \
+    if(argi >= (SvLEN(argsv) / sizeof(XSParseKeywordPiece))) \
+      SvGROW(argsv, SvLEN(argsv) * 2);                       \
+  } while(0)
 
 #define THISARG ((XSParseKeywordPiece *)SvPVX(argsv))[argi]
+
+  CHECK_GROW_ARGSV;
 
   THISARG.line = 
 #if HAVE_PERL_VERSION(5, 20, 0)
@@ -349,6 +396,8 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
   }
   bool is_enterleave = !!(piece->type & XPK_TYPEFLAG_ENTERLEAVE);
 
+  U32 optflag = is_optional ? PARSE_OPTIONAL : 0;
+
   U32 type = piece->type & 0xFFFF;
 
   switch(type) {
@@ -360,8 +409,21 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
       return;
 
     case XS_PARSE_KEYWORD_LITERALSTR:
-      lex_expect_str(piece->u.str);
+      lex_expect_str(piece->u.str, is_special);
       return;
+
+    case XS_PARSE_KEYWORD_AUTOSEMI:
+      parse_autosemi();
+      return;
+
+    case XS_PARSE_KEYWORD_WARNING:
+    {
+      int warnbit = piece->type >> 24;
+      if(warnbit && !ckWARN(warnbit))
+        return;
+      warn("%s", piece->u.str);
+      return;
+    }
 
     case XS_PARSE_KEYWORD_FAILURE:
       yycroak(piece->u.str);
@@ -375,27 +437,11 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
       I32 save_ix = block_start(1);
 
       if(piece->u.pieces) {
-        /* The prefix pieces */
-        const struct XSParseKeywordPieceType *pieces = piece->u.pieces;
-
-        while(pieces->type) {
-          if(pieces->type == XS_PARSE_KEYWORD_SETUP)
-            (pieces->u.callback)(aTHX_ hookdata);
-          else {
-            parse_piece(aTHX_ argsv, argidx, pieces, hookdata);
-            lex_read_space(0);
-          }
-
-          pieces++;
-        }
+        parse_prefix_pieces(aTHX_ argsv, argidx, piece->u.pieces, hookdata);
 
         if(*argidx > argi) {
           argi = *argidx;
-
-          if(argi >= (SvLEN(argsv) / sizeof(XSParseKeywordPiece)))
-            SvGROW(argsv, SvLEN(argsv) * 2);
-
-          intro_my();  /* in case any of the pieces was XPK_LEXVAR_MY */
+          CHECK_GROW_ARGSV;
         }
       }
 
@@ -424,22 +470,59 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
 
     case XS_PARSE_KEYWORD_ANONSUB:
     {
+      const struct XSParseKeywordPieceType *stages = piece->u.pieces;
+
+      while(stages && stages->type == XS_PARSE_KEYWORD_ANONSUB_PREPARE) {
+        (*stages->u.callback)(aTHX_ hookdata);
+        stages++;
+      }
+
       I32 floor_ix = start_subparse(FALSE, CVf_ANON);
       SAVEFREESV(PL_compcv);
 
       I32 save_ix = block_start(0);
+
+      while(stages && stages->type == XS_PARSE_KEYWORD_ANONSUB_START) {
+        (*stages->u.callback)(aTHX_ hookdata);
+        stages++;
+      }
+
       OP *body = parse_block(0);
       CHECK_PARSEFAIL;
 
+      while(stages && stages->type == XS_PARSE_KEYWORD_ANONSUB_END) {
+        body = (*stages->u.op_wrap_callback)(aTHX_ body, hookdata);
+        stages++;
+      }
+
       SvREFCNT_inc(PL_compcv);
       body = block_end(save_ix, body);
+
+      while(stages && stages->type == XS_PARSE_KEYWORD_ANONSUB_WRAP) {
+        body = (*stages->u.op_wrap_callback)(aTHX_ body, hookdata);
+        stages++;
+      }
 
       THISARG.cv = newATTRSUB(floor_ix, NULL, NULL, NULL, body);
       (*argidx)++;
       return;
     }
 
+    case XS_PARSE_KEYWORD_ARITHEXPR:
     case XS_PARSE_KEYWORD_TERMEXPR:
+    {
+      if(is_enterleave)
+        ENTER;
+
+      if(piece->u.pieces) {
+        parse_prefix_pieces(aTHX_ argsv, argidx, piece->u.pieces, hookdata);
+
+        if(*argidx > argi) {
+          argi = *argidx;
+          CHECK_GROW_ARGSV;
+        }
+      }
+
       /* TODO: This auto-parens behaviour ought to be tuneable, depend on how
        * many args, open at i=0 and close at i=MAX, etc...
        */
@@ -447,29 +530,47 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
         /* consume a fullexpr and stop at the close paren */
         lex_read_unichar(0);
 
-        THISARG.op = parse_fullexpr(0);
-        CHECK_PARSEFAIL;
-
         lex_read_space(0);
+
+        if(lex_peek_unichar(0) == ')')
+          THISARG.op = newOP(OP_STUB, 0);
+        else {
+          THISARG.op = parse_fullexpr(optflag);
+          CHECK_PARSEFAIL;
+
+          lex_read_space(0);
+        }
 
         lex_expect_unichar(')');
       }
       else {
-        THISARG.op = parse_termexpr(0);
+        switch(type) {
+          case XS_PARSE_KEYWORD_ARITHEXPR:
+            THISARG.op = parse_arithexpr(optflag);
+            break;
+          case XS_PARSE_KEYWORD_TERMEXPR:
+            THISARG.op = parse_termexpr(optflag);
+            break;
+        }
         CHECK_PARSEFAIL;
       }
 
-      if(want)
+      if(want && THISARG.op)
         THISARG.op = op_contextualize(THISARG.op, want);
 
       (*argidx)++;
+
+      if(is_enterleave)
+        LEAVE;
+
       return;
+    }
 
     case XS_PARSE_KEYWORD_LISTEXPR:
-      THISARG.op = parse_listexpr(0);
+      THISARG.op = parse_listexpr(optflag);
       CHECK_PARSEFAIL;
 
-      if(want)
+      if(want && THISARG.op)
         THISARG.op = op_contextualize(THISARG.op, want);
 
       (*argidx)++;
@@ -494,6 +595,8 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
     {
       /* name vs. padix begin with similar structure */
       SV *varname = lex_scan_lexvar();
+      if(!varname)
+        yycroak("Expected a lexical variable name");
       switch(SvPVX(varname)[0]) {
         case '$':
           if(!(piece->u.c & XPK_LEXVAR_SCALAR))
@@ -523,7 +626,11 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
       if(is_special)
         THISARG.padix = pad_add_name_pvn(SvPVX(varname), SvCUR(varname), 0, NULL, NULL);
       else
-        yycroak("TODO: XS_PARSE_KEYWORD_LEXVAR without LEXVAR_MY");
+#if HAVE_PERL_VERSION(5, 16, 0)
+        THISARG.padix = pad_findmy_pvn(SvPVX(varname), SvCUR(varname), 0);
+#else
+        THISARG.padix = pad_findmy(SvPVX(varname), SvCUR(varname), 0);
+#endif
 
       (*argidx)++;
       return;
@@ -566,8 +673,12 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
     }
 
     case XS_PARSE_KEYWORD_VSTRING:
-      THISARG.sv = lex_scan_version(is_optional ? PARSE_OPTIONAL : 0);
+      THISARG.sv = lex_scan_version(optflag);
       (*argidx)++;
+      return;
+
+    case XS_PARSE_KEYWORD_INTRO_MY:
+      intro_my();
       return;
 
     case XS_PARSE_KEYWORD_INFIX:
@@ -592,6 +703,7 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
           return;
         THISARG.i++;
         pieces++;
+        lex_read_space(0);
       }
 
       parse_pieces(aTHX_ argsv, argidx, pieces, hookdata);
@@ -603,6 +715,7 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
       (*argidx)++;
       while(probe_piece(aTHX_ argsv, argidx, piece->u.pieces + 0, hookdata)) {
         THISARG.i++;
+        lex_read_space(0);
         parse_pieces(aTHX_ argsv, argidx, piece->u.pieces + 1, hookdata);
       }
       return;
@@ -622,29 +735,45 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
         parse_pieces(aTHX_ argsv, argidx, piece->u.pieces + 1, hookdata);
         THISARG.i++;
 
+        lex_read_space(0);
+
         if(!probe_piece(aTHX_ argsv, argidx, piece->u.pieces + 0, hookdata))
           break;
+        lex_read_space(0);
       }
       return;
 
-    case XS_PARSE_KEYWORD_PARENSCOPE:
+    case XS_PARSE_KEYWORD_PARENS:
+    {
+      bool has_paren = (lex_peek_unichar(0) == '(');
+
       if(is_optional) {
         THISARG.i = 0;
         (*argidx)++;
-        if(lex_peek_unichar(0) != '(') return;
+        if(!has_paren) return;
         THISARG.i++;
       }
 
-      lex_expect_unichar('(');
-      lex_read_space(0);
+      if(has_paren) {
+        lex_expect_unichar('(');
+        lex_read_space(0);
 
-      parse_pieces(aTHX_ argsv, argidx, piece->u.pieces, hookdata);
+        parse_pieces(aTHX_ argsv, argidx, piece->u.pieces, hookdata);
 
-      lex_expect_unichar(')');
+        lex_expect_unichar(')');
+      }
+      else if(piece->type & XPK_TYPEFLAG_MAYBEPARENS) {
+        /* We didn't find a '(' but that's OK; they're optional */
+        parse_pieces(aTHX_ argsv, argidx, piece->u.pieces, hookdata);
+      }
+      else
+        /* We know this should fail */
+        lex_expect_unichar('(');
 
       return;
+    }
 
-    case XS_PARSE_KEYWORD_BRACKETSCOPE:
+    case XS_PARSE_KEYWORD_BRACKETS:
       if(is_optional) {
         THISARG.i = 0;
         (*argidx)++;
@@ -661,7 +790,7 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
 
       return;
 
-    case XS_PARSE_KEYWORD_BRACESCOPE:
+    case XS_PARSE_KEYWORD_BRACES:
       if(is_optional) {
         THISARG.i = 0;
         (*argidx)++;
@@ -678,7 +807,7 @@ static void parse_piece(pTHX_ SV *argsv, size_t *argidx, const struct XSParseKey
 
       return;
 
-    case XS_PARSE_KEYWORD_CHEVRONSCOPE:
+    case XS_PARSE_KEYWORD_CHEVRONS:
       if(is_optional) {
         THISARG.i = 0;
         (*argidx)++;
@@ -722,6 +851,12 @@ static int parse(pTHX_ OP **op, struct Registration *reg)
   SV *argsv = newSV(maxargs * sizeof(XSParseKeywordPiece));
   SAVEFREESV(argsv);
 
+  bool is_blockscope = hooks->flags & XPK_FLAG_BLOCKSCOPE;
+
+  int floor;
+  if(is_blockscope)
+    floor = block_start(TRUE);
+
   size_t argidx = 0;
   if(hooks->build)
     parse_pieces(aTHX_ argsv, &argidx, hooks->pieces, reg->hookdata);
@@ -731,13 +866,7 @@ static int parse(pTHX_ OP **op, struct Registration *reg)
   if(hooks->flags & XPK_FLAG_AUTOSEMI) {
     lex_read_space(0);
 
-    int c = lex_peek_unichar(0);
-    if(c == ';')
-      lex_read_unichar(0);
-    else if(!c || c == '}')
-      ; /* all is good */
-    else
-      yycroak("Expected: ';' or end of block");
+    parse_autosemi();
   }
 
   XSParseKeywordPiece *args = (XSParseKeywordPiece *)SvPVX(argsv);
@@ -746,9 +875,13 @@ static int parse(pTHX_ OP **op, struct Registration *reg)
   if(hooks->build) {
     /* build function takes an array of pointers to piece structs, so we can
      * add new fields to the end of them without breaking back-compat. */
-    SV *ptrssv = newSV(argidx * sizeof(XSParseKeywordPiece *));
-    XSParseKeywordPiece **argptrs = (XSParseKeywordPiece **)SvPVX(ptrssv);
-    SAVEFREESV(ptrssv);
+    XSParseKeywordPiece **argptrs = NULL;
+    if(argidx) {
+      SV *ptrssv = newSV(argidx * sizeof(XSParseKeywordPiece *));
+      SAVEFREESV(ptrssv);
+
+      argptrs = (XSParseKeywordPiece **)SvPVX(ptrssv);
+    }
 
     int i;
     for(i = 0; i < argidx; i++)
@@ -767,16 +900,21 @@ static int parse(pTHX_ OP **op, struct Registration *reg)
   else
     ret = (*hooks->build1)(aTHX_ op, args + 0, reg->hookdata);
 
+  if(is_blockscope)
+    *op = op_scope(block_end(floor, *op));
+
   switch(hooks->flags & (XPK_FLAG_EXPR|XPK_FLAG_STMT)) {
     case XPK_FLAG_EXPR:
       if(ret && (ret != KEYWORD_PLUGIN_EXPR))
         yycroakf("Expected parse function for '%s' keyword to return KEYWORD_PLUGIN_EXPR but it did not",
           reg->kwname);
+      break;
 
     case XPK_FLAG_STMT:
       if(ret && (ret != KEYWORD_PLUGIN_STMT))
         yycroakf("Expected parse function for '%s' keyword to return KEYWORD_PLUGIN_STMT but it did not",
           reg->kwname);
+      break;
   }
 
   return ret;
