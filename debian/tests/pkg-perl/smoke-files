@@ -1,8 +1,8 @@
 Build.PL
-XSParseInfix.h
-XSParseKeyword.h
 hax/
 inc/
 lib/
+share-infix/
+share-keyword/
 src/
 t/

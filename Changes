@@ -1,5 +1,57 @@
 Revision history for XS-Parse-Keyword
 
+0.46    2024-09-03
+        [CHANGES]
+         * Added `XPK_PREFIXED_TERMEXPR_ENTERLEAVE`
+         * Use module-specific rather than dist-specific dirs to store
+           `include/` files
+
+0.45    2024-08-29
+        [CHANGES]
+         * Refuse to register operators that have neither `.new_op` nor
+           `.ppadd`, as these will never work
+
+        [BUGFIXES]
+         * Update for perl 5.41.3: `OP_SMARTMATCH` is now removed, so make
+           that registration conditional (RT155194)
+
+0.44    2024-07-19
+        [BUGFIXES]
+         * `boot_xs_parse_infix()` has to load `XS/Parse/Infix.pm`, the perl
+           module
+         * Fix opname check for lexical operator alises, to match Perl's
+           actual identifier rules
+         * Fix deparse logic for fully-qualified infix operator names
+         * Fix `lex_scan_packagename()` to not get confused by attribute
+           syntax
+
+0.43    2024-07-03
+        [CHANGES]
+         * Use `File::ShareDir` for storing .h include files, rather than
+           storing the contents in the `__DATA__` section of the build helpers
+         * Support a new naming model for infix operators that supports
+           lexical-aliases and renaming at import time
+
+0.42    2024-04-30
+        [BUGFIXES]
+         * Don't crash on zero-argument calls to list-associative wrapper
+           functions (thanks aquanight) (RT153244)
+
+0.41    2024-04-25
+        [BUGFIXES]
+         * Remmeber to EXTEND the stack in list-associative operator wrapper
+           functions (thanks aquanight) (RT153173)
+
+0.40    2024-04-23
+        [CHANGES]
+         * Support N-way list-associative operators, implemented as LISTOPs
+         * Delete the no-longer-used API constants
+           XPI_OPERAND_{ARITH,TERM,CUSTOM} from XSParseInfix.h
+
+        [BUGFIXES]
+         * Avoid a subsequent `use VERSION` in unit tests to keep perl 5.39.8
+           happy
+
 0.39    2023-12-04
         [CHANGES]
          * Added optional variants of XPK_ARITHEXPR, XPK_TERMEXPR,

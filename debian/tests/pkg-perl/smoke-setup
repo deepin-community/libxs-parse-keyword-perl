@@ -11,4 +11,4 @@ perl Build.PL 2>&1
 # and now remove everything except t/
 # before `smoke' is run
 find . -maxdepth 1 -type f -delete
-rm -r blib/ lib/ inc/ hax/ src/ _build/
+rm -r blib/ lib/ inc/ hax/ share-infix/ share-keyword/ src/ _build/

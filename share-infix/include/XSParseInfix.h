@@ -42,6 +42,11 @@ enum XSParseInfixSelection {
   XPI_SELECT_MATCH_SMART,   /* any equality or other match operator, not including smartmatch */
 };
 
+/* flags */
+enum {
+  XPI_FLAG_LISTASSOC = (1<<0),
+};
+
 /* lhs_flags, rhs_flags */
 enum {
   XPI_OPERAND_TERM_LIST = 6, /* term in list context */
@@ -50,10 +55,6 @@ enum {
   /* Other bitflags */
   XPI_OPERAND_ONLY_LOOK = (1<<3),
 };
-// No longer used
-#define XPI_OPERAND_ARITH 0
-#define XPI_OPERAND_TERM  0
-#define XPI_OPERAND_CUSTOM (1<<7)
 
 struct XSParseInfixHooks {
   U16 flags;
@@ -121,8 +122,7 @@ static void S_boot_xs_parse_infix(pTHX_ double ver) {
   SV **svp;
   SV *versv = ver ? newSVnv(ver) : NULL;
 
-  /* XS::Parse::Infix is implemented in XS::Parse::Keyword's .so file */
-  load_module(PERL_LOADMOD_NOIMPORT, newSVpvs("XS::Parse::Keyword"), versv, NULL);
+  load_module(PERL_LOADMOD_NOIMPORT, newSVpvs("XS::Parse::Infix"), versv, NULL);
 
   svp = hv_fetchs(PL_modglobal, "XS::Parse::Infix/ABIVERSION_MIN", 0);
   if(!svp)
