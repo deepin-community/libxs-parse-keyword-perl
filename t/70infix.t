@@ -14,7 +14,7 @@ use testcase "t::infix";
 
 BEGIN { plan skip_all => "No PL_infix_plugin" unless XS::Parse::Infix::HAVE_PL_INFIX_PLUGIN; }
 
-use v5.16;
+use feature 'current_sub';
 
 BEGIN { $^H{"t::infix/permit"} = 1; }
 
@@ -36,6 +36,26 @@ BEGIN { $^H{"t::infix/permit"} = 1; }
 
    is( [ (2, 4, 6) addpairs (1, 1, 1) ],
       [ 3, 5, 7 ], 'addpairs infix operator' );
+}
+
+# fully-qualified + lexical alias
+{
+   BEGIN { t::infix->XS::Parse::Infix::apply_infix( 1, [ "fqadd" ], qw( fqadd ) ); }
+
+   my $result = 5 fqadd 10;
+   is( $result, 15, 'fqadd infix operator' );
+}
+
+{
+   my @importargs;
+   BEGIN { 
+      @importargs = ( 123, fqadd => { -as => "localname" }, 456 );
+      t::infix->XS::Parse::Infix::apply_infix( 1, \@importargs, qw( fqadd ) ); }
+
+   my $result = 6 localname 12;
+   is( $result, 18, 'infix operator renamed' );
+
+   is( \@importargs, [ 123, 456 ], 'apply_infix correctly mutated import args' );
 }
 
 sub _getoptree
@@ -154,6 +174,27 @@ sub is_deparsed
    is_deparsed sub { (1,2,3) addpairs (4,5,6) },
       '(1, 2, 3) addpairs (4, 5, 6);',
       'deparsed call to infix list/list operator';
+}
+
+# list-associative operator
+{
+   is( "a" cat "b" cat "c", "^abc^",
+      'cat operator runs correctly' );
+
+   is_optree sub { "a" cat "b" cat "c" },
+      "infix_cat_0xXXX[const, const, const]",
+      'optree of list-associative cat operator';
+
+   is_optree sub { ( "a" cat "b" ) cat "c" },
+      "infix_cat_0xXXX[infix_cat_0xXXX[const, const], const]",
+      'parens on LHS defeat list-associativity';
+   is_optree sub { "a" cat ( "b" cat "c" ) },
+      "infix_cat_0xXXX[const, infix_cat_0xXXX[const, const]]",
+      'parens on RHS defeat list-associativity';
+
+   is_deparsed sub { "a" cat "b" cat "c" },
+      q['a' cat 'b' cat 'c';],
+      'deparsed list-associative cat operator';
 }
 
 done_testing;

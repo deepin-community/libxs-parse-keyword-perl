@@ -1,3 +1,39 @@
+libxs-parse-keyword-perl (0.46-1) unstable; urgency=medium
+
+  * Import upstream version 0.46.
+  * Update auotpkgtest helper files to changed directory structure.
+
+ -- gregor herrmann <gregoa@debian.org>  Tue, 03 Sep 2024 17:55:18 +0200
+
+libxs-parse-keyword-perl (0.44-2) unstable; urgency=medium
+
+  * Add versioned Breaks on libsyntax-operator-equ-perl (cf. #1079556),
+    and also libsyntax-operator-in-perl.
+
+ -- gregor herrmann <gregoa@debian.org>  Mon, 26 Aug 2024 17:44:17 +0200
+
+libxs-parse-keyword-perl (0.44-1) unstable; urgency=medium
+
+  * Import upstream version 0.44.
+  * Add test and runtime dependency on libfile-sharedir-perl.
+  * Update autopkgtest helpers to changed file structure.
+
+ -- gregor herrmann <gregoa@debian.org>  Wed, 24 Jul 2024 16:45:49 +0200
+
+libxs-parse-keyword-perl (0.42-1) unstable; urgency=medium
+
+  * Import upstream version 0.42.
+
+ -- gregor herrmann <gregoa@debian.org>  Thu, 09 May 2024 00:05:36 +0200
+
+libxs-parse-keyword-perl (0.41-1) unstable; urgency=medium
+
+  * Import upstream version 0.41.
+  * Update years of upstream and packaging copyright.
+  * Declare compliance with Debian Policy 4.7.0.
+
+ -- gregor herrmann <gregoa@debian.org>  Sat, 27 Apr 2024 21:43:46 +0200
+
 libxs-parse-keyword-perl (0.39-1) unstable; urgency=medium
 
   * Import upstream version 0.39.
