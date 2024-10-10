@@ -1,15 +1,17 @@
 #  You may distribute under the terms of either the GNU General Public License
 #  or the Artistic License (the same terms as Perl itself)
 #
-#  (C) Paul Evans, 2021-2023 -- leonerd@leonerd.org.uk
+#  (C) Paul Evans, 2021-2024 -- leonerd@leonerd.org.uk
 
-package XS::Parse::Infix 0.39;
+package XS::Parse::Infix 0.46;
 
 use v5.14;
 use warnings;
 
 # No actual .xs file; the code is implemented in XS::Parse::Keyword
 require XS::Parse::Keyword;
+
+use Carp;
 
 =head1 NAME
 
@@ -35,6 +37,25 @@ In addition, the various C<XPK_INFIX_*> token types of L<XS::Parse::Keyword>
 support querying on this module, so some syntax provided by other modules may
 be able to make use of these new infix operators.
 
+=head2 Lexically-named vs. Globally-named Operators
+
+At version 0.43, the way this module operates has changed. Since this version,
+the preferred method of operation for infix operators is that the module that
+registers them creates them with a fully-qualified name (i.e. including the
+name of the package that implements them). Other code which wishes to import
+the operator can then provide a local name for it visible within a scope. This
+acts as an alias for the fully-qualified registered one. The imported name
+needs not be the same in various scopes - this allows imported operators to be
+renamed in specific scopes to avoid name clashes.
+
+Prior versions of this module only supported operators that have one global
+name that may or may not be enabled in lexical scopes. With this model, while
+the visiblity of an operator can be controlled per scope, if it is visible it
+must always have the same name and cannot be renamed to avoid a name clash.
+
+At some future version of this module the older method may be removed, once
+all of the existing CPAN modules have been updated to the new model.
+
 =cut
 
 =head1 CONSTANTS
@@ -51,6 +72,96 @@ No actual production releases of perl yet support this feature, but see above
 for details of development versions which do.
 
 =cut
+
+=head1 PERL FUNCTIONS
+
+=head2 apply_infix
+
+   $pkg->apply_infix( $on, $args, @infix );
+
+I<Since version 0.43.>
+
+Intended to be called by the C<import> and C<unimport> methods of a module
+that implements infix operators. This sets up the various keys required in the
+lexical hints hash to create a lexical alias for the requested operator(s).
+
+I<$on> should be a true value for C<import> or a false value for C<unimport>.
+I<$args> should be an array reference to the arguments array, which will be
+modified to splice out recognised values, leaving behind anything else
+unrecognised. I<@infix> should be a list of names of operators implemented by
+the importing package, named by I<$pkg>.
+
+After invoking this method, the caller should inspect for any remaining values
+in the arguments array, either to handle them in some other way, or just
+complain about them.
+
+   package Some::Infix::Module;
+
+   sub import
+   {
+      my $pkg = shift;
+      $pkg->XS::Parse::Infix::apply_infix( 1, \@_, qw( operator names here ) );
+      die "Unrecognised symbols: @_" if @_;
+   }
+
+When this module is C<use>d, named operators are aliased from the
+fully-qualified names.
+
+   use Some::Infix::Module qw( operator );
+
+   my $z = $x operator $y;
+
+At this point, the name C<operator> becomes a lexical alias to
+C<Some::Infix::Module::operator>.
+
+Each imported operator name can optionally be followed by import options,
+given in a hash reference. Currently the only named option recognised is
+C<-as>, which allows the importing scope to provide a different name for the
+imported operator, perhaps to avoid name clashes, or for neatness.
+
+   use Some::Infix::Module operator => { -as => "myname" };
+
+   my $z = $x myname $y;  # invokes Some::Infix::Module::operator
+
+=cut
+
+# helper functions for infix operator modules
+sub apply_infix
+{
+   my $pkg = shift;
+   my ( $on, $args, @infix ) = @_;
+
+   my %infix = map { $_ => 1 } @infix;
+
+   for ( my $idx = 0; 1; $idx++ ) {
+      $idx < @$args or last;
+
+      my $name = $args->[$idx];
+      $infix{$name} or next;
+
+      splice @$args, $idx, 1, ();
+
+      my %opts;
+      %opts = %{ splice @$args, $idx, 1, () } if "HASH" eq ref $args->[$idx];
+
+      my $localname = $name;
+      $localname = delete $opts{-as} if exists $opts{-as};
+
+      croak "Unrecognised apply_infix options " . join( ", ", sort keys %opts )
+         if %opts;
+
+      XS::Parse::Infix::check_opname( $localname ) or
+         croak "Local name '$localname' for imported operator $name is invalid";
+
+      my $hintkey = "XS::Parse::Infix/$localname";
+      my $fqname  = "${pkg}::${name}";
+
+      $on ? $^H{$hintkey} = $fqname
+          : delete $^H{$hintkey};
+
+      redo;
+   }
+}
 
 =head1 XS FUNCTIONS
 
@@ -116,6 +227,10 @@ These tokens will all yield an info structure, with the following fields:
 If the operator name contains any non-ASCII characters they are presumed to be
 in UTF-8 encoding. This will matter for deparse purposes.
 
+If I<opname> contains a double-colon (C<::>) sequence, it is presumed to be a
+fully-qualified operator name in the new interface style. If not, it is
+presumed to be an older globally-named one.
+
 =cut
 
 =head1 PARSE HOOKS
@@ -124,7 +239,7 @@ The C<XSParseInfixHooks> structure provides the following fields which are
 used at various stages of parsing.
 
    struct XSParseInfixHooks {
-      U16 flags; /* currently ignored */
+      U16 flags;
       U8 lhs_flags;
       U8 rhs_flags;
       enum XSParseInfixClassification cls;
@@ -143,8 +258,42 @@ used at various stages of parsing.
 
 =head2 Flags
 
-The C<flags> field is currently ignored. It is defined simply to reserve the
-space in case used in a later version. It should be set to zero.
+The C<flags> field gives details on how to handle the operator overall. It
+should be a bitmask of the following constants, or left as zero:
+
+=over 4
+
+=item XPI_FLAG_LISTASSOC
+
+I<Since version 0.40.>
+
+If set, the operator supports n-way list-associative syntax; written in the
+form
+
+   OPERAND op OPERAND op OPERAND op ...
+
+In this case, the custom operator will be a LISTOP rather than a BINOP, and
+every operand of the entire chain will be stored as a child op of it. The op
+function will need to know how many operands it is working on. There are two
+ways this may be indicated, depending on whether it was known at compile-time.
+
+If the number operands is known at compile-time, the C<OPf_STACKED> flag is
+not set, and the C<op_private> field indicates the number of operand
+expressions that were present.
+
+If the number is not known (for example, the operator is being used as the
+body of a generated wrapper function), the C<OPf_STACKED> flag is set. The
+number of arguments will be passed as the UV of an extra SV which is pushed
+last to the stack. The op function should pop this first to find out.
+
+It is typical to begin a list-associative op function with code such as:
+
+   int n = (PL_op->op_flags & OPf_STACKED) ? POPu : PL_op->op_private;
+
+If the operator is list-associative, then C<lhs_flags> and C<rhs_flags> must
+be equal.
+
+=back
 
 The C<lhs_flags> and C<rhs_flags> fields give details on how to handle the
 left- and right-hand side operands, respectively.
@@ -244,9 +393,9 @@ earlier, the C<SV **> pointer passed here will point to the same storage that
 C<parse> had previously had access to, so it can retrieve the results.
 
 If C<new_op> is not present, then the C<ppaddr> will be used instead to
-construct a new BINOP of the C<OP_CUSTOM> type. If an earlier C<parse> stage
-had stored additional results into the C<SV *> variable these will be lost
-here.
+construct a new BINOP or LISTOP of the C<OP_CUSTOM> type. If an earlier
+C<parse> stage had stored additional results into the C<SV *> variable these
+will be lost here.
 
 =head2 The Wrapper Function
 
@@ -433,13 +582,18 @@ sub B::Deparse::_deparse_infix_named
 {
    my ( $self, $opname, $op, $ctx ) = @_;
 
-   my $lhs = $op->first;
-   my $rhs = $op->last;
+   # Cope with list-associatives
+   my $kid = $op->first;
 
-   return join " ",
-      $self->deparse_binop_left( $op, $lhs, 14 ),
-      $opname,
-      $self->deparse_binop_right( $op, $rhs, 14 );
+   my @operands = ( $self->deparse_binop_left( $op, $kid, 14 ) );
+   $kid = $kid->sibling;
+
+   while( !B::Deparse::null( $kid ) ) {
+      push @operands, $self->deparse_binop_right( $op, $kid, 14 );
+      $kid = $kid->sibling;
+   }
+
+   return join " $opname ", @operands;
 }
 
 =head1 TODO
